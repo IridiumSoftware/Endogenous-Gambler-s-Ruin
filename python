@@ -20,7 +20,7 @@ def memory_walk(n=100, rho=0.3, m=2, beta=0.0, start=0, ruin=-10, gain=5, resolu
     - divergence_threshold: Belief divergence threshold for beta attenuation (0.5).
     - mode: 'endogenous' (default, paper model), 'cumulative' (Mazalov 2023 approx), 'fixed' (Mazalov 2024).
     - cost_per_step: Subtract each step (Mazalov 2025 inspired, default 0).
-    - mean_reversion_sign: '-' (default, accelerate downside as in code), '+' (true reversion, boost when down).
+    - mean_reversion_sign: '-' (accelerate downside), '+' (default, true reversion, boost when down).
 
     Self-correction: If abs(avg_h - expected_h) > threshold, reduce beta by 20%.
     History: Random ±1 init to avoid neutral bias.
@@ -130,7 +130,7 @@ def sensitivity_analysis(num_sims=1000):
     betas = np.arange(0.0, 0.6, 0.1)
     resolutions = np.arange(1, 11, 1)
     results = []
-    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}  # Defaults with fixed reversion
+    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '+'}  # Defaults with fixed reversion
     for rho in rhos:
         for beta in betas:
             for res in resolutions:
@@ -158,7 +158,7 @@ def sensitivity_analysis(num_sims=1000):
 
 def generate_figures(num_sims=1000):
     """Generate four .png figures per paper."""
-    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'rho': 0.3, 'mean_reversion_sign': '-'}
+    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'rho': 0.3, 'mean_reversion_sign': '+'}
 
     # Fig 1: Histogram surviving wallets (beta=0.1, res=1)
     sim1 = simulate_results(num_sims=num_sims, beta=0.1, resolution=1, **fixed)
@@ -225,13 +225,13 @@ def analyze_fragility(num_sims=1000):
 
     for i, rho in enumerate(rhos):
         for j, beta in enumerate(betas):
-            sim = simulate_results(num_sims=num_sims, rho=rho, beta=beta, mean_reversion_sign='-', resolution=1)
+            sim = simulate_results(num_sims=num_sims, rho=rho, beta=beta, mean_reversion_sign='+', resolution=1)
             var_matrix[i, j] = sim['var_utility']
             tail_matrix[i, j] = sim['tail_risk']
 
         # Premia at beta=0.1, compare res=1 vs 5
-        sim_res1 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='-', resolution=1)
-        sim_res5 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='-', resolution=5)
+        sim_res1 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='+', resolution=1)
+        sim_res5 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='+', resolution=5)
         premium = compute_info_premium(sim_res5['mean_utility'])
         premia.append(premium)
 
@@ -273,7 +273,7 @@ def plot_extended_effects(num_sims=1000):
     Saves as .png files. Verified: Compiles cleanly, outputs match sim trends.
     """
     betas = np.linspace(0, 0.4, 9)  # 9 points for smooth curves
-    fixed = {'rho': 0.3, 'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}
+    fixed = {'rho': 0.3, 'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '+'}
 
     ruin_rates = []
     mean_utilities = []
@@ -344,7 +344,7 @@ def plot_extended_effects(num_sims=1000):
           'extended_tail.png, extended_premia.png')
 
 if __name__ == "__main__":
-    kwargs = {'beta': 0.1, 'rho': 0.3, 'm': 2, 'n': 100, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}
+    kwargs = {'beta': 0.1, 'rho': 0.3, 'm': 2, 'n': 100, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '+'}
 
     res1 = simulate_results(resolution=1, **kwargs)
     print("Res=1:", res1)
