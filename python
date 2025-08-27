@@ -1,0 +1,365 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.optimize import fsolve
+
+def memory_walk(n=100, rho=0.3, m=2, beta=0.0, start=0, ruin=-10, gain=5, resolution=1,
+                divergence_threshold=0.5, mode='endogenous', cost_per_step=0.0, mean_reversion_sign='+'):
+    """
+    Simulate a single path of the non-Markovian gambler's ruin with endogenous bias,
+    optional stopping, and self-correction for divergence.
+
+    Parameters:
+    - n: Max steps (100).
+    - rho: Persistence (0.3).
+    - m: Memory length (2).
+    - beta: Endogenous bias (>=0).
+    - start: Initial S0 (0 for B0=10).
+    - ruin: Ruin threshold (-10 for B=0).
+    - gain: Gain threshold (5 for B=15).
+    - resolution: Observation frequency (1=every step).
+    - divergence_threshold: Belief divergence threshold for beta attenuation (0.5).
+    - mode: 'endogenous' (default, paper model), 'cumulative' (Mazalov 2023 approx), 'fixed' (Mazalov 2024).
+    - cost_per_step: Subtract each step (Mazalov 2025 inspired, default 0).
+    - mean_reversion_sign: '-' (default, accelerate downside as in code), '+' (true reversion, boost when down).
+
+    Self-correction: If abs(avg_h - expected_h) > threshold, reduce beta by 20%.
+    History: Random ±1 init to avoid neutral bias.
+
+    Returns: Final B = 10 + S.
+    """
+    S = start
+    history = np.random.choice([-1, 1], size=m)  # Random init for memory
+    wins = 0
+    losses = 0
+    expected_h = 0  # Fair game baseline
+    current_beta = beta  # Local copy for attenuation
+
+    for k in range(1, n + 1):
+        if mode == 'endogenous':
+            avg_h = np.mean(history)
+            divergence = abs(avg_h - expected_h)
+            if divergence > divergence_threshold:
+                current_beta *= 0.8  # Attenuate for misbelief
+            p_up = 0.5 + rho * avg_h + current_beta + np.random.normal(0, 0.1)
+            if avg_h < 0:
+                adjustment = 0.1 * abs(avg_h)
+                if mean_reversion_sign == '+':
+                    p_up += adjustment  # True mean-reversion: boost p_up when down
+                elif mean_reversion_sign == '-':
+                    p_up -= adjustment  # Accelerate downside
+                else:
+                    raise ValueError("Invalid mean_reversion_sign")
+            p_up = np.clip(p_up, 0, 1)
+        elif mode == 'cumulative':  # Approx Mazalov & Ivashko 2023
+            total = wins + losses + 2
+            p_up = (wins + 1) / total
+        elif mode == 'fixed':  # Like Mazalov & Ivashko 2024
+            p_up = 0.5
+        else:
+            raise ValueError("Invalid mode")
+
+        X = 1 if np.random.rand() < p_up else -1
+        S += X - cost_per_step
+        if X == 1:
+            wins += 1
+        else:
+            losses += 1
+        history = np.roll(history, -1)
+        history[-1] = X
+        expected_h = (expected_h * (k - 1) + X) / k  # Update expected
+
+        if S <= ruin:
+            return 0
+
+        if k % resolution == 0 and S >= gain:
+            return 10 + S
+
+    return 10 + S
+
+def utility(w):
+    """Concave utility: ln(w + 1)"""
+    return np.log(w + 1)
+
+def simulate_results(num_sims=10000, **kwargs):
+    """
+    Run Monte Carlo simulations.
+
+    Parameters: num_sims + memory_walk kwargs.
+
+    Returns: Dict with ruin_rate, mean_surviving_wallet, mean_utility, var_utility, tail_risk, wallets, utilities.
+    """
+    wallets = np.array([memory_walk(**kwargs) for _ in range(num_sims)])
+    utilities = utility(wallets)
+
+    ruin_rate = np.mean(wallets == 0)
+    mean_wallet = np.mean(wallets[wallets > 0]) if np.any(wallets > 0) else 0
+    mean_utility = np.mean(utilities)
+
+    # Bootstrapped var (1000 resamples for accuracy, efficient)
+    boot_vars = [np.var(np.random.choice(utilities, num_sims, replace=True)) for _ in range(1000)]
+    var_utility = np.mean(boot_vars)
+
+    # Tail risk: Fraction below 5th percentile (simple measure of left tail)
+    percentile_5 = np.percentile(utilities, 5)
+    tail_risk = np.mean(utilities < percentile_5)
+
+    return {
+        'ruin_rate': ruin_rate,
+        'mean_surviving_wallet': mean_wallet,
+        'mean_utility': mean_utility,
+        'var_utility': var_utility,
+        'tail_risk': tail_risk,
+        'wallets': wallets,
+        'utilities': utilities
+    }
+
+def compute_info_premium(u2, initial_wallet=10):
+    """Solve ln(initial - c + 1) = u2 for c."""
+    def eq(c):
+        return np.log(initial_wallet - c + 1) - u2
+    return fsolve(eq, 2)[0]  # Guess 2
+
+def sensitivity_analysis(num_sims=1000):
+    """
+    Sensitivity over rho, beta, resolution.
+
+    Computes results, prints sample, and writes full to 'sensitivity.tex' as LaTeX table.
+    Returns the list for further use.
+    """
+    rhos = np.arange(0.0, 0.6, 0.1)
+    betas = np.arange(0.0, 0.6, 0.1)
+    resolutions = np.arange(1, 11, 1)
+    results = []
+    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}  # Defaults with fixed reversion
+    for rho in rhos:
+        for beta in betas:
+            for res in resolutions:
+                kw = {'rho': rho, 'beta': beta, 'resolution': res, **fixed}
+                sim = simulate_results(num_sims=num_sims, **kw)
+                mean_u = sim['mean_utility']
+                var_u = sim['var_utility']
+                ruin_rate = sim['ruin_rate']
+                gain_prob = np.mean(sim['wallets'] >= 15)
+                results.append((rho, beta, res, mean_u, var_u, ruin_rate, gain_prob))
+
+    # Write to LaTeX file
+    with open('sensitivity.tex', 'w') as f:
+        f.write(r'\begin{tabular}{|c|c|c|c|c|c|c|}' + '\n')
+        f.write(r'\hline' + '\n')
+        f.write(r'\rho & \beta & Resolution & Mean Utility & Var Utility & Ruin Rate & Gain Prob \\' + '\n')
+        f.write(r'\hline' + '\n')
+        for row in results:
+            f.write(f'{row[0]:.1f} & {row[1]:.1f} & {row[2]} & {row[3]:.3f} & {row[4]:.3f} & {row[5]:.3f} & {row[6]:.3f} \\\\' + '\n')
+        f.write(r'\hline' + '\n')
+        f.write(r'\end{tabular}' + '\n')
+    print("Sensitivity results written to 'sensitivity.tex' as LaTeX table.")
+
+    return results
+
+def generate_figures(num_sims=1000):
+    """Generate four .png figures per paper."""
+    fixed = {'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'rho': 0.3, 'mean_reversion_sign': '-'}
+
+    # Fig 1: Histogram surviving wallets (beta=0.1, res=1)
+    sim1 = simulate_results(num_sims=num_sims, beta=0.1, resolution=1, **fixed)
+    surviving = sim1['wallets'][sim1['wallets'] > 0]
+    plt.figure()
+    plt.hist(surviving, bins=np.arange(10, 32, 2), alpha=0.7)
+    plt.title('Histogram of Surviving Wallets (beta=0.1)')
+    plt.xlabel('Wallet Value')
+    plt.ylabel('Count')
+    plt.savefig('figure1.png')
+    plt.close()
+
+    # Fig 2: Ruin vs beta (rho=0.3, res=1)
+    betas = np.linspace(0, 0.2, 5)
+    ruin_rates = []
+    for beta in betas:
+        sim = simulate_results(num_sims=num_sims, beta=beta, resolution=1, **fixed)
+        ruin_rates.append(sim['ruin_rate'])
+    plt.figure()
+    plt.plot(betas, ruin_rates, marker='o')
+    plt.title('Ruin Rate vs. beta (0-0.2)')
+    plt.xlabel('beta')
+    plt.ylabel('Ruin Rate')
+    plt.savefig('figure2.png')
+    plt.close()
+
+    # Fig 3: Utility dist (beta=0.1, res=1 vs 5)
+    sim_res1 = simulate_results(num_sims=num_sims, beta=0.1, resolution=1, **fixed)
+    sim_res5 = simulate_results(num_sims=num_sims, beta=0.1, resolution=5, **fixed)
+    plt.figure()
+    plt.hist(sim_res1['utilities'], bins=20, alpha=0.5, label='Res1')
+    plt.hist(sim_res5['utilities'], bins=20, alpha=0.5, label='Res5')
+    plt.title('Utility Distributions (beta=0.1)')
+    plt.xlabel('Utility')
+    plt.ylabel('Count')
+    plt.legend()
+    plt.savefig('figure3.png')
+    plt.close()
+
+    # Fig 4: Res vs premia (beta=0.1, rho=0.3)
+    resolutions = np.arange(1, 11, 1)
+    premia = []
+    u1 = simulate_results(num_sims=num_sims, beta=0.1, resolution=1, **fixed)['mean_utility']
+    for res in resolutions:
+        u2 = simulate_results(num_sims=num_sims, beta=0.1, resolution=res, **fixed)['mean_utility']
+        premium = compute_info_premium(u2)
+        premia.append(premium)
+    plt.figure()
+    plt.plot(resolutions, premia, marker='o')
+    plt.title('Resolution vs. Information Premia (beta=0.1)')
+    plt.xlabel('Resolution')
+    plt.ylabel('Premium c')
+    plt.savefig('figure4.png')
+    plt.close()
+
+    print("Figures generated: figure1.png, figure2.png, figure3.png, figure4.png")
+
+def analyze_fragility(num_sims=1000):
+    rhos = np.arange(0.0, 0.6, 0.1)
+    betas = np.linspace(0, 0.2, 5)
+    var_matrix = np.zeros((len(rhos), len(betas)))
+    tail_matrix = np.zeros((len(rhos), len(betas)))
+    premia = []  # For beta=0.1 across rhos
+
+    for i, rho in enumerate(rhos):
+        for j, beta in enumerate(betas):
+            sim = simulate_results(num_sims=num_sims, rho=rho, beta=beta, mean_reversion_sign='-', resolution=1)
+            var_matrix[i, j] = sim['var_utility']
+            tail_matrix[i, j] = sim['tail_risk']
+
+        # Premia at beta=0.1, compare res=1 vs 5
+        sim_res1 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='-', resolution=1)
+        sim_res5 = simulate_results(num_sims=num_sims, rho=rho, beta=0.1, mean_reversion_sign='-', resolution=5)
+        premium = compute_info_premium(sim_res5['mean_utility'])
+        premia.append(premium)
+
+    # Plot Variance Heatmap
+    plt.figure()
+    plt.imshow(var_matrix, cmap='viridis', aspect='auto', extent=[0, 0.2, 0, 0.5])
+    plt.colorbar(label='Utility Variance')
+    plt.xlabel('Beta')
+    plt.ylabel('Rho')
+    plt.title('Fragility: Variance Across Rho and Beta')
+    plt.savefig('fragility_var.png')
+    plt.close()
+
+    # Plot Tail Risk Heatmap
+    plt.figure()
+    plt.imshow(tail_matrix, cmap='viridis', aspect='auto', extent=[0, 0.2, 0, 0.5])
+    plt.colorbar(label='Tail Risk (Bottom 5%)')
+    plt.xlabel('Beta')
+    plt.ylabel('Rho')
+    plt.title('Fragility: Tail Risk Across Rho and Beta')
+    plt.savefig('fragility_tail.png')
+    plt.close()
+
+    # Plot Premia vs Rho
+    plt.figure()
+    plt.plot(rhos, premia, marker='o')
+    plt.title('Negative Premia Fragility vs Rho (at beta=0.1)')
+    plt.xlabel('Rho')
+    plt.ylabel('Information Premium')
+    plt.savefig('fragility_premia.png')
+    plt.close()
+
+    print("Fragility plots generated: fragility_var.png, fragility_tail.png, fragility_premia.png")
+
+def plot_extended_effects(num_sims=1000):
+    """
+    Generate plots for extended beta (0-0.4) effects on fragility metrics.
+    Uses simulate_results and compute_info_premium from base code.
+    Saves as .png files. Verified: Compiles cleanly, outputs match sim trends.
+    """
+    betas = np.linspace(0, 0.4, 9)  # 9 points for smooth curves
+    fixed = {'rho': 0.3, 'n': 100, 'm': 2, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}
+
+    ruin_rates = []
+    mean_utilities = []
+    var_utilities = []
+    tail_risks = []
+    premia = []
+
+    for beta in betas:
+        sim_res1 = simulate_results(num_sims=num_sims, beta=beta, resolution=1, **fixed)
+        sim_res5 = simulate_results(num_sims=num_sims, beta=beta, resolution=5, **fixed)
+        ruin_rates.append(sim_res1['ruin_rate'])
+        mean_utilities.append(sim_res1['mean_utility'])
+        var_utilities.append(sim_res1['var_utility'])
+        tail_risks.append(sim_res1['tail_risk'])
+        premia.append(compute_info_premium(sim_res5['mean_utility']))
+
+    # Plot 1: Ruin Rate vs Beta
+    plt.figure()
+    plt.plot(betas, ruin_rates, marker='o')
+    plt.title('Ruin Rate vs Beta (0-0.4)')
+    plt.xlabel('Beta')
+    plt.ylabel('Ruin Rate')
+    plt.grid(True)
+    plt.savefig('extended_ruin.png')
+    plt.close()
+
+    # Plot 2: Mean Utility vs Beta
+    plt.figure()
+    plt.plot(betas, mean_utilities, marker='o')
+    plt.title('Mean Utility vs Beta (0-0.4)')
+    plt.xlabel('Beta')
+    plt.ylabel('Mean Utility')
+    plt.grid(True)
+    plt.savefig('extended_utility.png')
+    plt.close()
+
+    # Plot 3: Utility Variance vs Beta
+    plt.figure()
+    plt.plot(betas, var_utilities, marker='o')
+    plt.title('Utility Variance vs Beta (0-0.4)')
+    plt.xlabel('Beta')
+    plt.ylabel('Variance')
+    plt.grid(True)
+    plt.savefig('extended_variance.png')
+    plt.close()
+
+    # Plot 4: Tail Risk vs Beta
+    plt.figure()
+    plt.plot(betas, tail_risks, marker='o')
+    plt.title('Tail Risk (Bottom 5%) vs Beta (0-0.4)')
+    plt.xlabel('Beta')
+    plt.ylabel('Tail Risk')
+    plt.grid(True)
+    plt.savefig('extended_tail.png')
+    plt.close()
+
+    # Plot 5: Info Premia vs Beta
+    plt.figure()
+    plt.plot(betas, premia, marker='o')
+    plt.title('Information Premia vs Beta (0-0.4)')
+    plt.xlabel('Beta')
+    plt.ylabel('Premium')
+    plt.grid(True)
+    plt.savefig('extended_premia.png')
+    plt.close()
+
+    print('Extended plots generated: extended_ruin.png, extended_utility.png, extended_variance.png, '
+          'extended_tail.png, extended_premia.png')
+
+if __name__ == "__main__":
+    kwargs = {'beta': 0.1, 'rho': 0.3, 'm': 2, 'n': 100, 'ruin': -10, 'gain': 5, 'mean_reversion_sign': '-'}
+
+    res1 = simulate_results(resolution=1, **kwargs)
+    print("Res=1:", res1)
+
+    res5 = simulate_results(resolution=5, **kwargs)
+    print("Res=5:", res5)
+
+    premium = compute_info_premium(res5['mean_utility'])
+    print(f"Premium: {premium:.2f}")
+
+    sens_results = sensitivity_analysis()  # Uses defaults, writes to LaTeX file
+    print("Sensitivity Results (sample first 5):", sens_results[:5])
+
+    generate_figures()
+
+    analyze_fragility()
+
+    plot_extended_effects()
